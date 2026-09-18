@@ -1,0 +1,14 @@
+name = "livescore-api"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# متغیر عمومی (غیر محرمانه) — دامنه(های) مجاز برای CORS.
+# برای اجازه به همه (مناسب توسعه/تست)، "*" بگذارید.
+# برای پروداکشن، دامنهٔ سایت خودتان را بگذارید (چند دامنه با کاما جدا شود):
+#   ALLOWED_ORIGIN = "https://yourdomain.com,https://www.yourdomain.com"
+[vars]
+ALLOWED_ORIGIN = "*"
+
+# کلید apifootball.com یک Secret است و اینجا نوشته نمی‌شود.
+# بعد از دیپلوی این دستور را اجرا کنید:
+#   wrangler secret put API_FOOTBALL_KEY
