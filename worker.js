@@ -2,49 +2,29 @@
  * ==========================================================================
  *  Livescore API Gateway — Cloudflare Worker
  * ==========================================================================
- *  یک پروکسی امن جلوی apiv3.apifootball.com.
- *  کلید API هرگز به سمت کلاینت (مرورگر) فرستاده نمی‌شود؛ فقط داخل این
- *  ورکر، از یک Secret خوانده و به درخواست بالادستی اضافه می‌شود.
+ *  پروکسی امن جلوی دو سرویس:
+ *    1) apiv3.apifootball.com   (نتایج، جدول، لیگ‌ها، اخبار ...)
+ *    2) scorebat.com Video API  (هایلایت بازی‌ها — فید رایگان)
+ *  کلیدها فقط داخل ورکر (Secret) نگه داشته می‌شوند و به مرورگر نمی‌رسند.
  *
- *  آدرس نهایی بعد از دیپلوی چیزی شبیه این خواهد بود:
- *    https://<worker-name>.<your-subdomain>.workers.dev/api/<route>
+ *  راه‌اندازی:
+ *    wrangler login
+ *    wrangler secret put API_FOOTBALL_KEY     ← کلید apifootball
+ *    wrangler secret put SCOREBAT_TOKEN       ← توکن Scorebat (از تب «دسترسی»)
+ *    wrangler deploy
  *
- *  ---------------------------------------------------------------------
- *  راه‌اندازی سریع:
- *    1) wrangler login
- *    2) wrangler secret put API_FOOTBALL_KEY     ← کلید apifootball.com را وارد کنید
- *    3) wrangler deploy
- *    4) آدرس خروجی را در فایل livescore.html به‌جای مقدار API_GATEWAY بگذارید
- *  ---------------------------------------------------------------------
+ *  مسیر جدید:
+ *    /api/highlights   → Scorebat free-feed  (خروجی: آرایه‌ی ساده‌ی مسابقات)
  *
- *  مسیرها (همه GET):
- *    /api/countries                              → get_countries
- *    /api/leagues        ?country_id=             → get_leagues
- *    /api/teams          ?league_id=|team_id=      → get_teams
- *    /api/players         ?player_id=|player_name=  → get_players
- *    /api/standings       ?league_id=              → get_standings
- *    /api/matches         ?from=&to=&league_id=&country_id=&match_id=&team_id=&match_live=&timezone= → get_events
- *    /api/live             (میانبر روی get_events با match_live=1 برای همان روز)
- *    /api/lineups          ?match_id=              → get_lineups
- *    /api/statistics       ?match_id=              → get_statistics
- *    /api/odds             ?from=&to=&match_id=     → get_odds
- *    /api/h2h              ?firstTeamId=&secondTeamId=  → get_H2H
- *    /api/predictions      ?from=&to=&league_id=&match_id=  → get_predictions
- *    /api/topscorers       ?league_id=             → get_topscorers
- *    /api/videos           ?match_id=              → get_videos
- *    /api/news             ?from=&to=              → get_news  (Premium plan only)
- *    /api/highlights                                → Scorebat free video-highlights feed (no key, no plan needed)
- *    /api/health            → وضعیت ورکر (بدون تماس با apifootball)
+ *  بقیهٔ مسیرها مثل قبل: countries, leagues, teams, players, standings,
+ *  matches, live, lineups, statistics, odds, h2h, predictions, topscorers,
+ *  videos, news, health
  * ==========================================================================
  */
 
 const UPSTREAM_BASE = 'https://apiv3.apifootball.com/';
-// Scorebat's free, no-key video-highlights feed (verified working with no auth
-// headers in multiple independent examples). Used only for the /api/highlights
-// route below — completely separate from apifootball and needs no API key.
-const SCOREBAT_URL = 'https://www.scorebat.com/video-api/v3/';
+const SCOREBAT_FREE_FEED = 'https://www.scorebat.com/video-api/v3/free-feed/';
 
-// نگاشت مسیر ساده‌ی ما ← اکشن واقعی apifootball + پارامترهای مجاز عبوری
 const ROUTES = {
   countries:   { action: 'get_countries',   allow: [] },
   leagues:     { action: 'get_leagues',     allow: ['country_id'] },
@@ -62,24 +42,11 @@ const ROUTES = {
   news:        { action: 'get_news',        allow: ['from', 'to'] },
 };
 
-// مدت کش (ثانیه) بر اساس نوع داده — داده‌ی زنده کوتاه، داده‌ی ثابت بلند
 const CACHE_TTL = {
-  live: 25,
-  matches: 45,
-  standings: 1800,
-  topscorers: 1800,
-  leagues: 21600,
-  countries: 86400,
-  teams: 21600,
-  players: 21600,
-  lineups: 60,
-  statistics: 60,
-  odds: 120,
-  h2h: 3600,
-  predictions: 1800,
-  videos: 600,
-  news: 900,
-  highlights: 600,
+  live: 25, matches: 45, standings: 1800, topscorers: 1800, leagues: 21600,
+  countries: 86400, teams: 21600, players: 21600, lineups: 60, statistics: 60,
+  odds: 120, h2h: 3600, predictions: 1800, videos: 600, news: 900,
+  highlights: 300, // فید رایگان Scorebat؛ ۵ دقیقه کافی است
   default: 60,
 };
 
@@ -95,7 +62,6 @@ function corsHeaders(env, request) {
   if (allowedOrigin === '*') {
     headers['Access-Control-Allow-Origin'] = '*';
   } else {
-    // پشتیبانی از چند دامنهٔ مجاز، جدا شده با کاما، در ALLOWED_ORIGIN
     const list = allowedOrigin.split(',').map(s => s.trim());
     headers['Access-Control-Allow-Origin'] = (origin && list.includes(origin)) ? origin : list[0];
   }
@@ -105,13 +71,9 @@ function corsHeaders(env, request) {
 function jsonResponse(data, status, env, request, cacheSeconds) {
   const headers = {
     'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': cacheSeconds ? `public, max-age=${cacheSeconds}` : 'no-store',
     ...corsHeaders(env, request),
   };
-  if (cacheSeconds) {
-    headers['Cache-Control'] = `public, max-age=${cacheSeconds}`;
-  } else {
-    headers['Cache-Control'] = 'no-store';
-  }
   return new Response(JSON.stringify(data), { status, headers });
 }
 
@@ -119,116 +81,91 @@ function errorResponse(message, status, env, request) {
   return jsonResponse({ error: true, message }, status, env, request, 0);
 }
 
-async function handleRoute(routeName, url, env, request) {
-  const route = ROUTES[routeName];
-  if (!route) {
-    return errorResponse(`مسیر ناشناخته: ${routeName}`, 404, env, request);
-  }
-  if (!env.API_FOOTBALL_KEY) {
-    return errorResponse('API_FOOTBALL_KEY روی این ورکر تنظیم نشده است (wrangler secret put API_FOOTBALL_KEY)', 500, env, request);
-  }
-
-  const upstream = new URL(UPSTREAM_BASE);
-  upstream.searchParams.set('action', route.action);
-  upstream.searchParams.set('APIkey', env.API_FOOTBALL_KEY);
-
-  // فقط پارامترهای سفیدلیست‌شده برای هر مسیر را عبور بده
-  for (const key of route.allow) {
-    const val = url.searchParams.get(key);
-    if (val !== null && val !== '') upstream.searchParams.set(key, val);
-  }
-
-  const cacheKey = new Request(upstream.toString(), { method: 'GET' });
+// کش لبه‌ی Cloudflare با کلیدی که توکن/کلید داخلش نیست
+async function cachedJson(cacheKeyUrl, ttl, ctx, producer) {
   const cache = caches.default;
-  let cached = await cache.match(cacheKey);
-  if (cached) {
-    const body = await cached.text();
-    return jsonResponse(JSON.parse(body), 200, env, request, CACHE_TTL[routeName] || CACHE_TTL.default);
-  }
+  const key = new Request(cacheKeyUrl, { method: 'GET' });
+  const hit = await cache.match(key);
+  if (hit) return { data: await hit.json(), fromCache: true };
 
-  let upstreamRes;
-  try {
-    upstreamRes = await fetch(upstream.toString(), {
-      headers: { 'Accept': 'application/json' },
-      cf: { cacheTtl: CACHE_TTL[routeName] || CACHE_TTL.default, cacheEverything: true },
-    });
-  } catch (err) {
-    return errorResponse(`عدم دسترسی به apifootball.com: ${err.message}`, 502, env, request);
-  }
-
-  if (!upstreamRes.ok) {
-    return errorResponse(`apifootball.com خطا برگرداند (HTTP ${upstreamRes.status})`, 502, env, request);
-  }
-
-  let data;
-  try {
-    data = await upstreamRes.json();
-  } catch (err) {
-    return errorResponse('پاسخ apifootball.com قابل‌تفسیر نبود (JSON نامعتبر)', 502, env, request);
-  }
-
-  // apifootball گاهی خطاها را به‌صورت {"error": N, "message": "..."} برمی‌گرداند نه آرایه
-  if (data && !Array.isArray(data) && data.error) {
-    return errorResponse(`apifootball.com: ${data.message || 'خطای نامشخص'}`, 502, env, request);
-  }
-
-  ctxWaitUntilCachePut(cacheKey, data, CACHE_TTL[routeName] || CACHE_TTL.default);
-  return jsonResponse(data, 200, env, request, CACHE_TTL[routeName] || CACHE_TTL.default);
-}
-
-// نگه‌داشتن یک رفرنس سراسری برای ctx.waitUntil در fetch اصلی
-let _ctx = null;
-function ctxWaitUntilCachePut(cacheKey, data, ttl) {
-  const cache = caches.default;
+  const data = await producer(); // اگر خطا بدهد به بالا پرتاب می‌شود
   const res = new Response(JSON.stringify(data), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ttl}` },
   });
-  if (_ctx) _ctx.waitUntil(cache.put(cacheKey, res));
+  ctx.waitUntil(cache.put(key, res));
+  return { data, fromCache: false };
 }
 
-function pad2(n) { return String(n).padStart(2, '0'); }
+// ---------------------- Scorebat (Highlights) ----------------------
+async function handleHighlights(env, request, ctx) {
+  if (!env.SCOREBAT_TOKEN) {
+    return errorResponse('SCOREBAT_TOKEN تنظیم نشده است (wrangler secret put SCOREBAT_TOKEN)', 500, env, request);
+  }
+  const ttl = CACHE_TTL.highlights;
+  try {
+    const { data } = await cachedJson('https://cache.internal/scorebat/free-feed', ttl, ctx, async () => {
+      const res = await fetch(`${SCOREBAT_FREE_FEED}?token=${encodeURIComponent(env.SCOREBAT_TOKEN)}`, {
+        headers: { 'Accept': 'application/json' },
+      });
+      if (!res.ok) throw new Error(`Scorebat HTTP ${res.status}`);
+      const json = await res.json();
+      // فرمت v3: { response: [ {title, competition, thumbnail, date, matchviewUrl, videos:[{title, embed}]} ] }
+      const list = Array.isArray(json) ? json : json && json.response;
+      if (!Array.isArray(list)) throw new Error('ساختار پاسخ Scorebat نامعتبر است (توکن را چک کنید)');
+      return list;
+    });
+    return jsonResponse(data, 200, env, request, ttl);
+  } catch (err) {
+    return errorResponse(`Scorebat: ${err.message}`, 502, env, request);
+  }
+}
+
+// ---------------------- apifootball ----------------------
+async function handleRoute(routeName, url, env, request, ctx) {
+  const route = ROUTES[routeName];
+  if (!route) return errorResponse(`مسیر ناشناخته: ${routeName}`, 404, env, request);
+  if (!env.API_FOOTBALL_KEY) {
+    return errorResponse('API_FOOTBALL_KEY تنظیم نشده است (wrangler secret put API_FOOTBALL_KEY)', 500, env, request);
+  }
+
+  const ttl = CACHE_TTL[routeName] || CACHE_TTL.default;
+
+  // پارامترهای سفیدلیست‌شده
+  const params = new URLSearchParams();
+  params.set('action', route.action);
+  for (const key of route.allow) {
+    const val = url.searchParams.get(key);
+    if (val !== null && val !== '') params.set(key, val);
+  }
+  // کلید کش بدون APIkey ساخته می‌شود تا کلید هرگز داخل کش/لاگ نرود
+  const cacheKeyUrl = `https://cache.internal/apifootball?${params.toString()}`;
+
+  try {
+    const { data } = await cachedJson(cacheKeyUrl, ttl, ctx, async () => {
+      const upstream = new URL(UPSTREAM_BASE);
+      params.forEach((v, k) => upstream.searchParams.set(k, v));
+      upstream.searchParams.set('APIkey', env.API_FOOTBALL_KEY);
+      const res = await fetch(upstream.toString(), { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      // apifootball گاهی خطا را به‌صورت {"error": N, "message": "..."} برمی‌گرداند
+      if (json && !Array.isArray(json) && json.error) throw new Error(json.message || 'خطای نامشخص');
+      return json;
+    });
+    return jsonResponse(data, 200, env, request, ttl);
+  } catch (err) {
+    return errorResponse(`apifootball.com: ${err.message}`, 502, env, request);
+  }
+}
+
+const pad2 = (n) => String(n).padStart(2, '0');
 function todayISO() {
   const d = new Date();
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 }
 
-// Scorebat needs no key and no action= param — just fetch its public feed
-// and pass it through with our own CORS headers, cached like everything else.
-async function handleHighlights(env, request) {
-  const cacheKey = new Request(SCOREBAT_URL, { method: 'GET' });
-  const cache = caches.default;
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    const body = await cached.text();
-    return jsonResponse(JSON.parse(body), 200, env, request, CACHE_TTL.highlights);
-  }
-
-  let upstreamRes;
-  try {
-    upstreamRes = await fetch(SCOREBAT_URL, {
-      headers: { 'Accept': 'application/json' },
-      cf: { cacheTtl: CACHE_TTL.highlights, cacheEverything: true },
-    });
-  } catch (err) {
-    return errorResponse(`عدم دسترسی به scorebat.com: ${err.message}`, 502, env, request);
-  }
-  if (!upstreamRes.ok) {
-    return errorResponse(`scorebat.com خطا برگرداند (HTTP ${upstreamRes.status})`, 502, env, request);
-  }
-  let data;
-  try {
-    data = await upstreamRes.json();
-  } catch (err) {
-    return errorResponse('پاسخ scorebat.com قابل‌تفسیر نبود (JSON نامعتبر)', 502, env, request);
-  }
-
-  ctxWaitUntilCachePut(cacheKey, data, CACHE_TTL.highlights);
-  return jsonResponse(data, 200, env, request, CACHE_TTL.highlights);
-}
-
 export default {
   async fetch(request, env, ctx) {
-    _ctx = ctx;
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
@@ -238,32 +175,32 @@ export default {
       return errorResponse('فقط متد GET پشتیبانی می‌شود', 405, env, request);
     }
 
-    // مسیرها باید با /api/ شروع شوند
-    const parts = url.pathname.split('/').filter(Boolean); // ["api", "matches"]
+    const parts = url.pathname.split('/').filter(Boolean);
     if (parts[0] !== 'api' || !parts[1]) {
-      return errorResponse('مسیر معتبر نیست. نمونه: /api/matches?from=2026-09-18&to=2026-09-18', 404, env, request);
+      return errorResponse('مسیر معتبر نیست. نمونه: /api/matches?from=2026-09-19&to=2026-09-19', 404, env, request);
     }
-
     const routeName = parts[1].toLowerCase();
 
     if (routeName === 'health') {
-      return jsonResponse({ ok: true, time: new Date().toISOString(), hasKey: Boolean(env.API_FOOTBALL_KEY) }, 200, env, request, 0);
+      return jsonResponse({
+        ok: true,
+        time: new Date().toISOString(),
+        hasApiFootballKey: Boolean(env.API_FOOTBALL_KEY),
+        hasScorebatToken: Boolean(env.SCOREBAT_TOKEN),
+      }, 200, env, request, 0);
     }
 
-    if (routeName === 'highlights') {
-      return handleHighlights(env, request);
-    }
+    if (routeName === 'highlights') return handleHighlights(env, request, ctx);
 
     if (routeName === 'live') {
-      // میانبر: بازی‌های زنده‌ی امروز، بدون نیاز به from/to دستی در کلاینت
       const today = todayISO();
       const liveUrl = new URL(url.toString());
       liveUrl.searchParams.set('from', today);
       liveUrl.searchParams.set('to', today);
       liveUrl.searchParams.set('match_live', '1');
-      return handleRoute('matches', liveUrl, env, request);
+      return handleRoute('matches', liveUrl, env, request, ctx);
     }
 
-    return handleRoute(routeName, url, env, request);
+    return handleRoute(routeName, url, env, request, ctx);
   },
 };
