@@ -33,11 +33,16 @@
  *    /api/topscorers       ?league_id=             → get_topscorers
  *    /api/videos           ?match_id=              → get_videos
  *    /api/news             ?from=&to=              → get_news  (Premium plan only)
+ *    /api/highlights                                → Scorebat free video-highlights feed (no key, no plan needed)
  *    /api/health            → وضعیت ورکر (بدون تماس با apifootball)
  * ==========================================================================
  */
 
 const UPSTREAM_BASE = 'https://apiv3.apifootball.com/';
+// Scorebat's free, no-key video-highlights feed (verified working with no auth
+// headers in multiple independent examples). Used only for the /api/highlights
+// route below — completely separate from apifootball and needs no API key.
+const SCOREBAT_URL = 'https://www.scorebat.com/video-api/v3/';
 
 // نگاشت مسیر ساده‌ی ما ← اکشن واقعی apifootball + پارامترهای مجاز عبوری
 const ROUTES = {
@@ -74,6 +79,7 @@ const CACHE_TTL = {
   predictions: 1800,
   videos: 600,
   news: 900,
+  highlights: 600,
   default: 60,
 };
 
@@ -186,6 +192,40 @@ function todayISO() {
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 }
 
+// Scorebat needs no key and no action= param — just fetch its public feed
+// and pass it through with our own CORS headers, cached like everything else.
+async function handleHighlights(env, request) {
+  const cacheKey = new Request(SCOREBAT_URL, { method: 'GET' });
+  const cache = caches.default;
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    const body = await cached.text();
+    return jsonResponse(JSON.parse(body), 200, env, request, CACHE_TTL.highlights);
+  }
+
+  let upstreamRes;
+  try {
+    upstreamRes = await fetch(SCOREBAT_URL, {
+      headers: { 'Accept': 'application/json' },
+      cf: { cacheTtl: CACHE_TTL.highlights, cacheEverything: true },
+    });
+  } catch (err) {
+    return errorResponse(`عدم دسترسی به scorebat.com: ${err.message}`, 502, env, request);
+  }
+  if (!upstreamRes.ok) {
+    return errorResponse(`scorebat.com خطا برگرداند (HTTP ${upstreamRes.status})`, 502, env, request);
+  }
+  let data;
+  try {
+    data = await upstreamRes.json();
+  } catch (err) {
+    return errorResponse('پاسخ scorebat.com قابل‌تفسیر نبود (JSON نامعتبر)', 502, env, request);
+  }
+
+  ctxWaitUntilCachePut(cacheKey, data, CACHE_TTL.highlights);
+  return jsonResponse(data, 200, env, request, CACHE_TTL.highlights);
+}
+
 export default {
   async fetch(request, env, ctx) {
     _ctx = ctx;
@@ -208,6 +248,10 @@ export default {
 
     if (routeName === 'health') {
       return jsonResponse({ ok: true, time: new Date().toISOString(), hasKey: Boolean(env.API_FOOTBALL_KEY) }, 200, env, request, 0);
+    }
+
+    if (routeName === 'highlights') {
+      return handleHighlights(env, request);
     }
 
     if (routeName === 'live') {
