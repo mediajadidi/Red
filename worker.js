@@ -32,6 +32,7 @@
  *    /api/predictions      ?from=&to=&league_id=&match_id=  → get_predictions
  *    /api/topscorers       ?league_id=             → get_topscorers
  *    /api/videos           ?match_id=              → get_videos
+ *    /api/news             ?from=&to=              → get_news  (Premium plan only)
  *    /api/health            → وضعیت ورکر (بدون تماس با apifootball)
  * ==========================================================================
  */
@@ -53,6 +54,7 @@ const ROUTES = {
   predictions: { action: 'get_predictions', allow: ['from', 'to', 'country_id', 'league_id', 'match_id'] },
   topscorers:  { action: 'get_topscorers',  allow: ['league_id'] },
   videos:      { action: 'get_videos',      allow: ['match_id'] },
+  news:        { action: 'get_news',        allow: ['from', 'to'] },
 };
 
 // مدت کش (ثانیه) بر اساس نوع داده — داده‌ی زنده کوتاه، داده‌ی ثابت بلند
@@ -71,6 +73,7 @@ const CACHE_TTL = {
   h2h: 3600,
   predictions: 1800,
   videos: 600,
+  news: 900,
   default: 60,
 };
 
