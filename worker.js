@@ -5,32 +5,60 @@
  * - مسیرها (همان مسیرهایی که index.html صدا می‌زند):
  *     /api/matches?from=&to=[&league_id=&country_id=&team_id=&match_id=&timezone=]   → get_events
  *     /api/live[?league_id=&country_id=&timezone=]                                    → get_events&match_live=1
+ *     /api/matchdetail?match_id=                                                      → get_events&match_id= (شامل لاین‌آپ/آمار/گل/کارت)
  *     /api/standings?league_id=                                                       → get_standings
  *     /api/topscorers?league_id=                                                      → get_topscorers
  *     /api/countries                                                                  → get_countries
  *     /api/leagues[?country_id=]                                                      → get_leagues
  *     /api/news?from=&to=[&league_id=&team_id=&match_id=]                             → get_news
+ *     /api/teams?team_id=|league_id=                                                  → get_teams
+ *     /api/players?player_id=|player_name=                                            → get_players
+ *     /api/lineups?match_id=                                                          → get_lineups (سبک‌تر از matchdetail، برای رفرش)
+ *     /api/statistics?match_id=                                                       → get_statistics (سبک‌تر از matchdetail، برای رفرش)
+ *     /api/h2h?firstTeamId=&secondTeamId=                                             → get_H2H
+ *     /api/predictions?match_id=|league_id=|from=&to=                                 → get_predictions
+ *     /api/odds?match_id=|from=&to=                                                   → get_odds
+ *     /api/liveodds?match_id=|league_id=|country_id=                                  → get_live_odds_commnets (شامل گزارش زندهٔ متنی)
+ *     /api/videos?match_id=                                                           → get_videos
  *     /api/highlights                                                                 → فید Scorebat
  * - پاسخ‌ها در کش لبهٔ Cloudflare نگه داشته می‌شوند تا سهمیهٔ API هدر نرود
- *   (کشورها/لیگ‌ها ۶ ساعت، لایو ۱۵ ثانیه، ...).
+ *   (کشورها/لیگ‌ها/تیم‌ها چند ساعت، لایو/جزئیات مسابقهٔ جاری چند ثانیه، ...).
  * - اختیاری: متغیر ALLOWED_ORIGINS (چند دامنه با کاما) برای محدودکردن CORS؛ اگر خالی باشد همه مجازند.
+ *
+ * توجه: برخی اکشن‌ها (get_news, get_H2H, get_predictions, get_odds,
+ * get_live_odds_commnets) ممکن است روی پلن‌های بالاتر apifootball در دسترس
+ * باشند؛ اگر اکانت شما به آن‌ها دسترسی ندارد، این مسیرها آرایهٔ خالی
+ * برمی‌گردانند (نه خطا) و بخش مربوطه در فرانت به‌صورت خودکار «داده‌ای موجود
+ * نیست» نشان می‌دهد.
  */
 const UPSTREAM = 'https://apiv3.apifootball.com/';
 const SCOREBAT = 'https://www.scorebat.com/video-api/v3/';
 const HOUR = 3600;
 
 const ROUTES = {
-  matches:    { action: 'get_events',     params: ['from','to','league_id','country_id','team_id','match_id','timezone'], need: ['from','to'], ttl: 30 },
-  live:       { action: 'get_events',     params: ['league_id','country_id','timezone'], fixed: { match_live: '1' }, liveWindow: true, ttl: 15 },
-  standings:  { action: 'get_standings',  params: ['league_id'], need: ['league_id'], ttl: 120 },
-  topscorers: { action: 'get_topscorers', params: ['league_id'], need: ['league_id'], ttl: 600 },
-  countries:  { action: 'get_countries',  params: [], ttl: 6 * HOUR },
-  leagues:    { action: 'get_leagues',    params: ['country_id'], ttl: 6 * HOUR },
-  news:       { action: 'get_news',       params: ['from','to','league_id','team_id','match_id'], need: ['from','to'], ttl: 300 },
-  highlights: { external: SCOREBAT, ttl: 300 },
+  matches:     { action: 'get_events',           params: ['from', 'to', 'league_id', 'country_id', 'team_id', 'match_id', 'timezone'], need: ['from', 'to'], ttl: 30 },
+  live:        { action: 'get_events',           params: ['league_id', 'country_id', 'timezone'], fixed: { match_live: '1' }, liveWindow: true, ttl: 15 },
+  matchdetail: { action: 'get_events',           params: ['match_id', 'timezone'], need: ['match_id'], fixed: { withPlayerStats: '1' }, ttl: 20 },
+  standings:   { action: 'get_standings',        params: ['league_id'], need: ['league_id'], ttl: 120 },
+  topscorers:  { action: 'get_topscorers',       params: ['league_id'], need: ['league_id'], ttl: 600 },
+  countries:   { action: 'get_countries',        params: [], ttl: 6 * HOUR },
+  leagues:     { action: 'get_leagues',          params: ['country_id'], ttl: 6 * HOUR },
+  news:        { action: 'get_news',             params: ['from', 'to', 'league_id', 'team_id', 'match_id'], need: ['from', 'to'], ttl: 300 },
+  teams:       { action: 'get_teams',            params: ['team_id', 'league_id'], ttl: 3 * HOUR },
+  players:     { action: 'get_players',          params: ['player_id', 'player_name'], ttl: 3 * HOUR },
+  lineups:     { action: 'get_lineups',          params: ['match_id'], need: ['match_id'], ttl: 20 },
+  statistics:  { action: 'get_statistics',       params: ['match_id'], need: ['match_id'], ttl: 20 },
+  h2h:         { action: 'get_H2H',              params: ['firstTeamId', 'secondTeamId', 'timezone'], need: ['firstTeamId', 'secondTeamId'], ttl: HOUR },
+  predictions: { action: 'get_predictions',      params: ['match_id', 'league_id', 'country_id', 'from', 'to'], ttl: 600 },
+  odds:        { action: 'get_odds',             params: ['match_id', 'from', 'to'], ttl: 60 },
+  liveodds:    { action: 'get_live_odds_commnets', params: ['match_id', 'league_id', 'country_id'], ttl: 15 },
+  videos:      { action: 'get_videos',           params: ['match_id'], ttl: 600 },
+  highlights:  { external: SCOREBAT, ttl: 300 },
 };
 
-const SAFE_VALUE = /^[\w\-+:./ ]{1,64}$/;
+// حروف یونیکد/اعداد/فاصله و چند نویسهٔ بی‌خطر — برای پارامترهایی مثل نام
+// تیم/بازیکن که می‌توانند حروف لاتین غیرانگلیسی داشته باشند (مثل Alavés).
+const SAFE_VALUE = /^[\p{L}\p{N}\s\-+:./,']{1,80}$/u;
 const ymd = (d) => d.toISOString().slice(0, 10);
 
 function corsHeaders(request, env) {
@@ -97,7 +125,8 @@ export default {
       if (!res.ok) throw new Error('upstream_' + res.status);
       const data = await res.json();
       if (data && !Array.isArray(data) && typeof data === 'object' && data.error !== undefined && !route.external) {
-        // «داده‌ای یافت نشد» → لیست خالی (کد/پیام برای دیباگ در هدر)
+        // «داده‌ای یافت نشد» یا «این اکشن روی پلن شما نیست» → لیست خالی
+        // (کد/پیام برای دیباگ در هدر X-Upstream-Message می‌ماند، نه در بدنه)
         note = String(data.message || data.error).slice(0, 120);
         body = '[]'; ttl = Math.min(ttl, 30);
       } else {
